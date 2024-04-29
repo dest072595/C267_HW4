@@ -26,6 +26,9 @@ jacobi preconditioner:
 https://phtournier.pages.math.cnrs.fr/5mm29/blockjacobi/
 
 
+lecture 19: 
+https://drive.google.com/file/d/1Osre3sqZopUTYPgAequf4gDY66AlueH3/view
+
 
 Running the code: 
 
