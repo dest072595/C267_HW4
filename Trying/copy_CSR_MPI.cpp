@@ -7,6 +7,7 @@
 #include <Eigen/Dense>
 #include <Eigen/IterativeLinearSolvers>
 #include <cstring>
+#include <map>
 
 typedef Eigen::SparseMatrix<double, Eigen::RowMajor> SpMat;
 typedef Eigen::VectorXd Vec;
@@ -49,26 +50,50 @@ public:
     DistributedMatrix(int globalRows, int localRows, int rank, int size)
         : localMatrix(localRows, globalRows), globalRows(globalRows), localRows(localRows), rank(rank), size(size) {}
 
-    void insert(int row, int col, double value) {
-        assert(row < localRows);
-        localMatrix.insert(row, col) = value;
-    }
-
     void finalize() {
         localMatrix.makeCompressed();
+
+        // Ensure diagonal dominance
         for (int i = 0; i < localRows; ++i) {
             if (localMatrix.coeffRef(i, i) == 0) {
-                std::cerr << "Rank: " << rank << " Warning: Diagonal element at " << i << " is zero. Adjusting to small non-zero value.\n";
                 localMatrix.coeffRef(i, i) = 1e-10;
             }
         }
-        // Compute the Cholesky decomposition directly on the symmetric matrix
+
+        // Symmetrize the matrix
+        SpMat transposed = localMatrix.transpose();
+        localMatrix = (localMatrix + transposed) * 0.5;
+
+        // Check symmetry again after symmetrization(validation)
+        if (!localMatrix.isApprox(localMatrix.transpose())) {
+            std::cerr << "Symmetrization failed; matrix is not symmetric on rank " << rank << "." << std::endl;
+            return;
+        }
+
+        // Compute the Cholesky decomposition
         localCholesky.compute(localMatrix);
         if (localCholesky.info() != Eigen::Success) {
-            std::cerr << "Decomposition failed!\n";
+            std::cerr << "Cholesky decomposition failed on rank " << rank << "." << std::endl;
+            return;
         }
     }
 
+    /* # handle transpose?
+     void finalize() {
+         localMatrix.makeCompressed();
+
+         // Ensure the matrix is symmetric
+         SpMat transposed = localMatrix.transpose();
+         SpMat symMatrix = (localMatrix + transposed) * 0.5; // Create a symmetric matrix explicitly
+
+         // Now, use this symmetric matrix with SimplicialLLT
+         localCholesky.compute(symMatrix);
+         if (localCholesky.info() != Eigen::Success) {
+             std::cerr << "Cholesky decomposition failed on rank " << rank << ".\n";
+         }
+     }
+
+     */
     
 
     Vec multiply(const Vec& x) const {
@@ -76,9 +101,20 @@ public:
         Vec local_x = x.segment(rank * localRows, localRows);
         Vec local_result = localMatrix * local_x;
         Vec global_result(globalRows);
-        MPI_Allreduce(local_result.data(), global_result.data(), localRows, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+
+        int MPI_Error = MPI_Allreduce(local_result.data(), global_result.data(), localRows, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        if (MPI_Error != MPI_SUCCESS) {
+            char error_string[BUFSIZ];
+            int length_of_error_string, error_class;
+            MPI_Error_class(MPI_Error, &error_class);
+            MPI_Error_string(error_class, error_string, &length_of_error_string);
+            std::cerr << "MPI Error: " << error_string << std::endl;
+            MPI_Abort(MPI_COMM_WORLD, MPI_Error);
+        }
+
         return global_result;
     }
+
 
     Vec applyPreconditioner(const Vec& r) const {
         return localCholesky.solve(r);
